@@ -8,6 +8,9 @@ SOURCE_URL ?= https://github.com/strekol/ig-gadgets
 TAG        ?= $(IG_VERSION)-dev
 
 IG         ?= ig
+COSIGN     ?= cosign
+# cosign key reference: the CI secret through env://, or a key file path.
+COSIGN_KEY ?= env://COSIGN_PRIVATE_KEY
 BUILD      := build
 UPSTREAM   := $(BUILD)/upstream
 OCI        := $(BUILD)/oci
@@ -21,7 +24,7 @@ BUILD_FLAGS ?= --builder-image-pull missing
 VERIFY_trace_sni := template: l4endpoint
 VERIFY_trace_tcp := bytes_received:
 
-.PHONY: all fetch check patch build verify push clean
+.PHONY: all fetch check patch build verify push sign verify-signature clean
 
 all: build
 
@@ -69,9 +72,31 @@ verify:
 
 ## Credentials: AUTH_FILE (docker-style config.json), else ig's /var/lib/ig/config.json, else
 ## ~/.docker/config.json (`docker login`). ig ignores REGISTRY_AUTH_FILE despite its --help.
+## Records each pushed index digest under build/<gadget>.digest, for `sign` (ig reports it on
+## stderr, hence 2>&1).
 push:
+	@mkdir -p $(BUILD) && rm -f $(foreach g,$(GADGETS),$(BUILD)/$(g).digest) && for g in $(GADGETS); do \
+	  out=$$($(IG) image push $(if $(AUTH_FILE),--authfile $(AUTH_FILE)) $(IMAGE_BASE)/$$g:$(TAG) 2>&1); rc=$$?; \
+	  echo "$$out"; [ $$rc -eq 0 ] || exit 1; \
+	  echo "$$out" | sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' > $(BUILD)/$$g.digest; \
+	  [ -s $(BUILD)/$$g.digest ] || { echo "no digest in the ig image push output for $$g" >&2; exit 1; }; \
+	done
+
+## Signs by digest what `push` sent (a tag can move in between). --recursive also signs the
+## per-arch manifests; legacy .sig format, the one IG looks up first, as upstream signs its own.
+## Registry credentials: cosign reads $$DOCKER_CONFIG/config.json.
+sign:
 	@for g in $(GADGETS); do \
-	  $(IG) image push $(if $(AUTH_FILE),--authfile $(AUTH_FILE)) $(IMAGE_BASE)/$$g:$(TAG) || exit 1; \
+	  [ -s $(BUILD)/$$g.digest ] || { echo "$(BUILD)/$$g.digest missing: run make push first" >&2; exit 1; }; \
+	  $(COSIGN) sign --new-bundle-format=false --use-signing-config=false --key $(COSIGN_KEY) --yes --recursive \
+	    $(IMAGE_BASE)/$$g@$$(cat $(BUILD)/$$g.digest) || exit 1; \
+	done
+
+## The images must verify against the committed cosign.pub, the key the IG daemons trust.
+verify-signature:
+	@for g in $(GADGETS); do \
+	  out=$$($(COSIGN) verify --key cosign.pub $(IMAGE_BASE)/$$g:$(TAG) 2>&1 >/dev/null) \
+	    && echo "signature $$g: ok" || { echo "$$out" >&2; echo "signature $$g: $(IMAGE_BASE)/$$g:$(TAG) not signed with cosign.pub" >&2; exit 1; }; \
 	done
 
 clean:
