@@ -1,0 +1,78 @@
+name: release
+
+on:
+  push:
+    tags: ['v*-patched.*']
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.ref_name }}
+      # From the IG release's SHA256SUMS, for the version in IG_VERSION: a tampered download fails.
+      IG_SHA256_AMD64: dd8e2942b7f2a572f4a77672532a4992970a820cbadac108d4784351ba7c3098
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The image tag says what it was built from: refuse a tag whose IG part is not IG_VERSION.
+      - name: Tag matches IG_VERSION
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-patched\.[0-9]+$'; then
+            echo "::error::tag $TAG is not v<ig>-patched.<n>"; exit 1
+          fi
+          if [ "${TAG%-patched.*}" != "$(cat IG_VERSION)" ]; then
+            echo "::error::tag $TAG does not match IG_VERSION $(cat IG_VERSION)"; exit 1
+          fi
+      - name: Install ig
+        run: |
+          v=$(cat IG_VERSION)
+          curl -fsSLo "$RUNNER_TEMP/ig.tar.gz" \
+            "https://github.com/inspektor-gadget/inspektor-gadget/releases/download/$v/ig-linux-amd64-$v.tar.gz"
+          echo "$IG_SHA256_AMD64  $RUNNER_TEMP/ig.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local/bin -xzf "$RUNNER_TEMP/ig.tar.gz" ig
+          ig version
+      - name: make check
+        run: make check
+      # Builds amd64 + arm64 objects through the upstream gadget-builder container, then verifies
+      # the patched fields are in the images.
+      - name: make build
+        run: make build TAG="$TAG"
+      # ig reads a docker-style auth file; written here rather than through `docker login` so no
+      # credential helper of the runner gets in the way.
+      - name: make push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          auth="$RUNNER_TEMP/auth.json"
+          trap 'rm -f "$auth"' EXIT
+          umask 077
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' "$GITHUB_ACTOR" "$GITHUB_TOKEN" | base64 -w0)" > "$auth"
+          make push TAG="$TAG" AUTH_FILE="$auth"
+      # The images are meant to be public: fail unless each one resolves without credentials.
+      # A package created private by its first push has to be made public once, in its settings.
+      - name: Anonymous pull check
+        run: |
+          # shellcheck disable=SC2016 # $($*) is make syntax, expanded by make, not the shell
+          var() { make -s --eval 'print-%: ; @echo $($*)' "print-$1"; }
+          # ghcr denies the anonymous token itself (403) for a private package: both calls count.
+          pullable() {
+            local token
+            token=$(curl -fsS "https://ghcr.io/token?scope=repository:$1:pull" | jq -r .token) &&
+              curl -fsS -o /dev/null -I -H "Authorization: Bearer $token" \
+                -H 'Accept: application/vnd.oci.image.index.v1+json' "https://ghcr.io/v2/$1/manifests/$TAG"
+          }
+          base=$(var IMAGE_BASE)
+          for g in $(var GADGETS); do
+            repo="${base#ghcr.io/}/$g"
+            pullable "$repo" || { echo "::error::ghcr.io/$repo:$TAG is not anonymously pullable"; exit 1; }
+            echo "ghcr.io/$repo:$TAG: public"
+          done

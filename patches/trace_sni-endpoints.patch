@@ -1,0 +1,138 @@
+diff --git a/trace_sni/gadget.yaml b/trace_sni/gadget.yaml
+index 4d17964..3a39407 100644
+--- a/trace_sni/gadget.yaml
++++ b/trace_sni/gadget.yaml
+@@ -9,3 +9,11 @@ datasources:
+       name:
+         annotations:
+           columns.width: 30
++      src:
++        annotations:
++          description: Source endpoint of the TCP connection carrying the ClientHello
++          template: l4endpoint
++      dst:
++        annotations:
++          description: Destination endpoint of the TCP connection carrying the ClientHello
++          template: l4endpoint
+diff --git a/trace_sni/program.bpf.c b/trace_sni/program.bpf.c
+index 1a2e3a0..846ba73 100644
+--- a/trace_sni/program.bpf.c
++++ b/trace_sni/program.bpf.c
+@@ -5,6 +5,7 @@
+ #include <linux/bpf.h>
+ #include <linux/if_ether.h>
+ #include <linux/ip.h>
++#include <linux/ipv6.h>
+ #include <linux/in.h>
+ #include <linux/tcp.h>
+ 
+@@ -57,6 +58,8 @@ struct event_t {
+ 	gadget_timestamp timestamp_raw;
+ 	gadget_netns_id netns_id;
+ 	struct gadget_process proc;
++	struct gadget_l4endpoint_t src;
++	struct gadget_l4endpoint_t dst;
+ 
+ 	char name[TLS_MAX_SERVER_NAME_LEN];
+ };
+@@ -165,28 +168,50 @@ static __always_inline int parse_sni(struct __sk_buff *skb, int data_offset,
+ SEC("socket1")
+ int ig_trace_sni(struct __sk_buff *skb)
+ {
+-	// Skip frames with non-IP Ethernet protocol.
+ 	struct ethhdr ethh;
+ 	if (bpf_skb_load_bytes(skb, 0, &ethh, sizeof ethh))
+ 		return 0;
+-	if (bpf_ntohs(ethh.h_proto) != ETH_P_IP)
+-		return 0;
+-
+-	int ip_off = ETH_HLEN;
+-	// Read the IP header.
+-	struct iphdr iph;
+-	if (bpf_skb_load_bytes(skb, ip_off, &iph, sizeof iph))
+-		return 0;
+ 
+-	// Skip packets with IP protocol other than TCP.
+-	if (iph.protocol != IPPROTO_TCP)
++	__u16 h_proto = bpf_ntohs(ethh.h_proto);
++	struct event_t event = {
++		0,
++	};
++	int tcp_off;
++
++	switch (h_proto) {
++	case ETH_P_IP: {
++		struct iphdr iph;
++		if (bpf_skb_load_bytes(skb, ETH_HLEN, &iph, sizeof iph))
++			return 0;
++		if (iph.protocol != IPPROTO_TCP)
++			return 0;
++		// IHL is in 32-bit words: the IPv4 header has no fixed size.
++		tcp_off = ETH_HLEN + iph.ihl * 4;
++		event.src.version = event.dst.version = 4;
++		// Already network byte order, the format Inspektor Gadget expects.
++		event.src.addr_raw.v4 = iph.saddr;
++		event.dst.addr_raw.v4 = iph.daddr;
++		break;
++	}
++	case ETH_P_IPV6: {
++		struct ipv6hdr ip6h;
++		if (bpf_skb_load_bytes(skb, ETH_HLEN, &ip6h, sizeof ip6h))
++			return 0;
++		// Extension headers are not walked: a ClientHello behind one is
++		// rare enough that the complexity is not worth it here.
++		if (ip6h.nexthdr != IPPROTO_TCP)
++			return 0;
++		tcp_off = ETH_HLEN + sizeof ip6h;
++		event.src.version = event.dst.version = 6;
++		__builtin_memcpy(event.src.addr_raw.v6, &ip6h.saddr,
++				 sizeof(event.src.addr_raw.v6));
++		__builtin_memcpy(event.dst.addr_raw.v6, &ip6h.daddr,
++				 sizeof(event.dst.addr_raw.v6));
++		break;
++	}
++	default:
+ 		return 0;
+-
+-	// An IPv4 header doesn't have a fixed size. The IHL field of a packet
+-	// represents the size of the IP header in 32-bit words, so we need to
+-	// multiply this value by 4 to get the header size in bytes.
+-	__u8 ip_header_len = iph.ihl * 4;
+-	int tcp_off = ip_off + ip_header_len;
++	}
+ 
+ 	// Read the TCP header.
+ 	struct tcphdr tcph;
+@@ -202,9 +227,9 @@ int ig_trace_sni(struct __sk_buff *skb)
+ 	// TLS data starts at this offset.
+ 	int payload_off = tcp_off + tcp_header_len;
+ 
+-	// Parse SNI.
+-	char sni[TLS_MAX_SERVER_NAME_LEN] = {};
+-	int read = parse_sni(skb, payload_off, sni);
++	// Parse the SNI straight into the event: a separate buffer plus the
++	// event no longer fits the 512-byte BPF stack with the endpoints.
++	int read = parse_sni(skb, payload_off, event.name);
+ 	if (read == 0)
+ 		return 0;
+ 
+@@ -212,16 +237,11 @@ int ig_trace_sni(struct __sk_buff *skb)
+ 	if (gadget_should_discard_data_by_skb(skb_val))
+ 		return 0;
+ 
+-	struct event_t event = {
+-		0,
+-	};
++	event.src.proto_raw = event.dst.proto_raw = IPPROTO_TCP;
++	event.src.port = bpf_ntohs(tcph.source);
++	event.dst.port = bpf_ntohs(tcph.dest);
+ 
+ 	event.netns_id = skb->cb[0]; // cb[0] initialized by dispatcher.bpf.c
+-	for (int i = 0; i < TLS_MAX_SERVER_NAME_LEN; i++) {
+-		if (sni[i] == '\0')
+-			break;
+-		event.name[i] = sni[i];
+-	}
+ 	event.timestamp_raw = bpf_ktime_get_boot_ns();
+ 
+ 	// Enrich event with process metadata

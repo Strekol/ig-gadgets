@@ -1,0 +1,61 @@
+diff --git a/trace_tcp/ebpf/close.h b/trace_tcp/ebpf/close.h
+index 1c6e4dd..87b4d0f 100644
+--- a/trace_tcp/ebpf/close.h
++++ b/trace_tcp/ebpf/close.h
+@@ -43,6 +43,15 @@ static __always_inline void handle_tcp_close(struct pt_regs *ctx,
+ 
+ 	fill_event(event, &tuple, NULL, 0, close);
+ 
++	// Lifetime counters of the socket, only final once it closes. bytes_sent
++	// counts retransmissions too (what left the host; bytes_acked would be
++	// the payload the peer received), bytes_received is in-order payload.
++	struct tcp_sock *tp = (struct tcp_sock *)sk;
++	if (bpf_core_field_exists(tp->bytes_sent))
++		event->bytes_sent = BPF_CORE_READ(tp, bytes_sent);
++	if (bpf_core_field_exists(tp->bytes_received))
++		event->bytes_received = BPF_CORE_READ(tp, bytes_received);
++
+ 	gadget_submit_buf(ctx, &events, event, sizeof(*event));
+ }
+ 
+diff --git a/trace_tcp/ebpf/common.h b/trace_tcp/ebpf/common.h
+index 9f330bc..4bfe97d 100644
+--- a/trace_tcp/ebpf/common.h
++++ b/trace_tcp/ebpf/common.h
+@@ -38,6 +38,8 @@ struct event {
+ 	gadget_errno error_raw;
+ 	int fd;
+ 	int accept_fd;
++	__u64 bytes_sent;
++	__u64 bytes_received;
+ };
+ 
+ struct tuple_key_t {
+@@ -209,6 +211,8 @@ static __always_inline void fill_event(struct event *event,
+ 	event->error_raw = err;
+ 	event->fd = -1;
+ 	event->accept_fd = -1;
++	event->bytes_sent = 0;
++	event->bytes_received = 0;
+ 	if (proc)
+ 		event->proc = *proc;
+ 	else
+diff --git a/trace_tcp/gadget.yaml b/trace_tcp/gadget.yaml
+index b1f99c3..e5ab598 100644
+--- a/trace_tcp/gadget.yaml
++++ b/trace_tcp/gadget.yaml
+@@ -30,6 +30,14 @@ datasources:
+         annotations:
+           description: The FD of the new connection returned by accept, or -1 for errors cases or other events
+           columns.hidden: true
++      bytes_sent:
++        annotations:
++          description: Bytes sent over the connection's lifetime, set on close events only
++          columns.hidden: true
++      bytes_received:
++        annotations:
++          description: Bytes received over the connection's lifetime, set on close events only
++          columns.hidden: true
+ params:
+   ebpf:
+     accept_only:
