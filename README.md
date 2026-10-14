@@ -13,8 +13,8 @@ Both are proposed upstream; a patch is deleted once a release carries it.
 ## Images
 
 ```
-ghcr.io/strekol/ig-gadgets/trace_sni:v0.56.1-patched.2
-ghcr.io/strekol/ig-gadgets/trace_tcp:v0.56.1-patched.2
+ghcr.io/strekol/ig-gadgets/trace_sni:v0.57.0-patched.1
+ghcr.io/strekol/ig-gadgets/trace_tcp:v0.57.0-patched.1
 ```
 
 Public, pulled anonymously like the upstream gadgets. Tag = `<IG_VERSION>-patched.<n>`; the release
@@ -24,7 +24,7 @@ Signed with cosign (from `.2`; `.1` is unsigned), public key in [`cosign.pub`](c
 verifies gadget images by default against the upstream key only, so add this one next to it:
 
 ```sh
-ig run ghcr.io/strekol/ig-gadgets/trace_tcp:v0.56.1-patched.2 --public-keys="$(cat cosign.pub)"
+ig run ghcr.io/strekol/ig-gadgets/trace_tcp:v0.57.0-patched.1 --public-keys="$(cat cosign.pub)"
 ```
 
 For the IG daemon (Helm chart `config`), keep the upstream key or the official gadgets stop
@@ -56,7 +56,7 @@ signing secrets (`COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD`) decrypt to the `cosign
 ```sh
 make check                      # patches apply on the pinned upstream
 make build                      # ig image build via the upstream builder container (docker), then verify
-make build TAG=v0.56.1-dev      # default tag is <IG_VERSION>-dev
+make build TAG=v0.57.0-dev      # default tag is <IG_VERSION>-dev
 make verify                     # export under build/oci/, patched fields present
 make push AUTH_FILE=<file>      # ig image push to IMAGE_BASE/<gadget>:TAG, digests under build/
 make sign COSIGN_KEY=<key>      # cosign sign the pushed digests (default key: env://COSIGN_PRIVATE_KEY)
@@ -75,10 +75,10 @@ access):
 
 ```sh
 ig image export <image> gadgets.tar
-docker run --rm -v igstore:/var/lib/ig -v $PWD:/work ghcr.io/inspektor-gadget/ig:v0.56.1 image import /work/gadgets.tar
+docker run --rm -v igstore:/var/lib/ig -v $PWD:/work ghcr.io/inspektor-gadget/ig:v0.57.0 image import /work/gadgets.tar
 docker run --rm --privileged --pid=host --net=host -v /:/host -v /sys/kernel/debug:/sys/kernel/debug \
   -v /sys/fs/bpf:/sys/fs/bpf -v /run:/run -v igstore:/var/lib/ig \
-  ghcr.io/inspektor-gadget/ig:v0.56.1 run <image> --verify-image=false -o json --timeout 30
+  ghcr.io/inspektor-gadget/ig:v0.57.0 run <image> --verify-image=false -o json --timeout 30
 # meanwhile: docker run --rm curlimages/curl -sS -o /dev/null https://example.com
 ```
 

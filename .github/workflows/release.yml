@@ -17,7 +17,7 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
       # From the IG release's SHA256SUMS, for the version in IG_VERSION: a tampered download fails.
-      IG_SHA256_AMD64: dd8e2942b7f2a572f4a77672532a4992970a820cbadac108d4784351ba7c3098
+      IG_SHA256_AMD64: f5e3233c6c1ffc3ad068326913e11def23c7cef6c764e585c2205cda0e2f76f1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
